@@ -399,6 +399,11 @@ export type NextConfig = {
      * Defaults to 50000000.
      */
     maximumResponseBody?: number;
+    /**
+     * Most redirects `/_next/image` follows while resolving an internal source.
+     * Defaults to 3, matching Next.js. `0` rejects the first redirect with 508.
+     */
+    maximumRedirects?: number;
   };
   /**
    * Enable React Strict Mode. When `true`, the client root is wrapped in

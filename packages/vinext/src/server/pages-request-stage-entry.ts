@@ -17,6 +17,7 @@ import {
   handleConfiguredImageOptimization,
   isImageOptimizationPath,
   isImageSourceBodyStatus,
+  isRedirectStatus,
 } from "./image-optimization.js";
 import type { ImageConfig } from "./image-optimization.js";
 import {
@@ -199,6 +200,7 @@ const imageConfig: ImageConfig | undefined = vinextConfig?.images
       contentSecurityPolicy: vinextConfig.images.contentSecurityPolicy,
       minimumCacheTTL: vinextConfig.images.minimumCacheTTL,
       maximumResponseBody: vinextConfig.images.maximumResponseBody,
+      maximumRedirects: vinextConfig.images.maximumRedirects,
     }
   : undefined;
 
@@ -758,7 +760,8 @@ async function handleRequestImpl(
 
     // Run an image source through the pipeline as a direct request without the
     // caller's headers, like Next.js' fetchInternalImage, so middleware admits
-    // it. Only a public file the pipeline selects with a 2xx outcome is served.
+    // it. A public file with a 2xx outcome or a redirect is served; pages are
+    // not rendered.
     const resolvePublicImageSource = async (
       sourceRequest: Request,
       sourceAssets: AssetFetcher,
@@ -821,6 +824,12 @@ async function handleRequestImpl(
         },
       );
       if (sourceResult.type !== "response") return null;
+      if (
+        isRedirectStatus(sourceResult.response.status) &&
+        sourceResult.response.headers.get("Location")
+      ) {
+        return sourceResult.response;
+      }
       await sourceResult.response.body?.cancel().catch(() => {});
       if (isImageSourceBodyStatus(sourceResult.response.status) && sourceAsset !== null) {
         // The pipeline staged middleware and `headers()` values on its response.

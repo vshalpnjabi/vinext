@@ -33,6 +33,7 @@ declare module "virtual:vinext-rsc-entry" {
     contentSecurityPolicy?: string;
     minimumCacheTTL?: number;
     maximumResponseBody?: number;
+    maximumRedirects?: number;
   };
 }
 
@@ -70,6 +71,7 @@ declare module "virtual:vinext-app-request-entry" {
     contentSecurityPolicy?: string;
     minimumCacheTTL?: number;
     maximumResponseBody?: number;
+    maximumRedirects?: number;
   };
 }
 

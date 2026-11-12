@@ -579,6 +579,7 @@ export const __imageConfig = ${JSON.stringify({
     contentSecurityPolicy: config?.imageConfig?.contentSecurityPolicy,
     minimumCacheTTL: config?.imageConfig?.minimumCacheTTL,
     maximumResponseBody: config?.imageConfig?.maximumResponseBody,
+    maximumRedirects: config?.imageConfig?.maximumRedirects,
   })};
 export const __clientBuildFiles = __pagesClientAssets.clientBuildFiles ?? [];
 // The matcher reads recorded prerenders, and this stage can run without the
@@ -809,6 +810,7 @@ export function generateRscEntry(
     contentSecurityPolicy: config?.imageConfig?.contentSecurityPolicy,
     minimumCacheTTL: config?.imageConfig?.minimumCacheTTL,
     maximumResponseBody: config?.imageConfig?.maximumResponseBody,
+    maximumRedirects: config?.imageConfig?.maximumRedirects,
   };
   const manifestCode = buildAppRscManifestCode({
     deferEagerImports: Boolean(instrumentationPath),

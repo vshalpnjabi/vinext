@@ -158,6 +158,7 @@ export async function generatePagesRequestEntry(
       contentSecurityPolicy: nextConfig?.images?.contentSecurityPolicy,
       minimumCacheTTL: nextConfig?.images?.minimumCacheTTL,
       maximumResponseBody: nextConfig?.images?.maximumResponseBody,
+      maximumRedirects: nextConfig?.images?.maximumRedirects,
     },
   });
   const instrumentationImportCode = instrumentationPath
@@ -442,6 +443,7 @@ export async function generateServerEntry(
       contentSecurityPolicy: nextConfig?.images?.contentSecurityPolicy,
       minimumCacheTTL: nextConfig?.images?.minimumCacheTTL,
       maximumResponseBody: nextConfig?.images?.maximumResponseBody,
+      maximumRedirects: nextConfig?.images?.maximumRedirects,
     },
   });
 

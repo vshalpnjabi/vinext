@@ -36,11 +36,12 @@ test.describe("image optimization source behind middleware", () => {
     expect(image.headers()["content-type"] ?? "").not.toContain("image/");
   });
 
-  test("does not follow a redirect middleware answers the source with", async ({ request }) => {
-    const image = await request.get(imagePath("/vinext-image.png?redirect"));
-    expect(image.status()).toBe(400);
-    expect(await image.text()).toBe(INVALID_IMAGE);
-    expect(image.headers()["content-type"] ?? "").not.toContain("image/");
+  test("follows a redirect middleware answers the source with", async ({ request }) => {
+    // Ported from Next.js: test/e2e/image-optimizer-internal-redirect/
+    // https://github.com/vercel/next.js/blob/canary/test/e2e/image-optimizer-internal-redirect/image-optimizer-internal-redirect.test.ts
+    const image = await request.get(imagePath("/vinext-image.png?redirect"), { maxRedirects: 0 });
+    expect(image.status()).toBe(200);
+    expect(image.headers()["content-type"]).toBe("image/png");
   });
 
   test("serves an admitted or rewritten source", async ({ request }) => {

@@ -10,6 +10,7 @@ import {
   handleConfiguredImageOptimization,
   invalidImageSourceResponse,
   isImageSourceBodyStatus,
+  isRedirectStatus,
   markImageBuildAsset,
   type ImageConfig,
   type ImageOptimizationSignal,
@@ -28,7 +29,7 @@ export type WorkerImageSourceOptions = {
   /**
    * Run `sourceRequest`, a GET without the caller's headers, through the
    * application pipeline and return the public file it selects with a 2xx
-   * outcome, or null.
+   * outcome, a redirect the optimizer should follow, or null.
    */
   fetchPublicFile(sourceRequest: Request): Promise<Response | null>;
 };
@@ -112,6 +113,13 @@ export async function fetchWorkerImageSource(
     attachRequestCfMetadata(new Request(sourceUrl, { signal: request.signal }), request),
   );
   if (sourceResponse && isImageSourceBodyStatus(sourceResponse.status)) return sourceResponse;
+  if (
+    sourceResponse &&
+    isRedirectStatus(sourceResponse.status) &&
+    sourceResponse.headers.get("Location")
+  ) {
+    return sourceResponse;
+  }
   if (sourceResponse) cancelResponseBody(sourceResponse);
   return invalidImageSourceResponse();
 }
@@ -134,7 +142,8 @@ export function withStagedCacheControl(asset: Response, cacheControl: string | n
 
 /**
  * Return the public file a framework static-file signal selects, provided the
- * pipeline answered with a body-bearing 2xx outcome. The file is fetched with middleware's
+ * pipeline answered with a body-bearing 2xx outcome, or pass through a redirect
+ * the optimizer should follow. The file is fetched with middleware's
  * request header overrides, as resolveStaticAssetSignal fetches it, and keeps
  * the Cache-Control the pipeline staged.
  */
@@ -143,6 +152,9 @@ export function fetchSignalledPublicFile(
   sourceRequest: Request,
   assets: VinextAssetFetcher,
 ): Promise<Response> | null {
+  if (isRedirectStatus(response.status) && response.headers.get("Location")) {
+    return Promise.resolve(response);
+  }
   const signal = isImageSourceBodyStatus(response.status) ? readStaticFileSignal(response) : null;
   const requestHeaders = readStaticFileSignalRequestHeaders(response);
   const stagedCacheControl = response.headers.get("Cache-Control");

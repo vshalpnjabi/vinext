@@ -25,6 +25,7 @@ import { ImageSourceReader, ImageSourceTooLargeError } from "./image-source-read
 import { hasLocalMatch, type LocalPattern } from "./image-local-patterns.js";
 import { setCacheStateHeaders } from "./cache-headers.js";
 import { badRequestResponse } from "./http-error-responses.js";
+import { isPrivateIp } from "vinext/shims/image-config";
 
 /** The pathname that triggers image optimization (matches Next.js). */
 export const IMAGE_OPTIMIZATION_PATH = "/_next/image";
@@ -85,15 +86,20 @@ export type ImageConfig = {
   /** Allow SVG through the image optimization endpoint. Default: false. */
   dangerouslyAllowSVG?: boolean;
   /**
-   * Allow image optimization for hostnames that resolve to private IP addresses.
+   * Allow image optimization for hostnames that are private IP addresses.
    * Default: false.
    *
-   * Note: This field is currently reserved for future server-side remote-image
-   * fetching. vinext's image optimization endpoint only serves local files, so
-   * there is no active server-side SSRF vector — the flag is consumed client-side
-   * via the image shim instead.
+   * Used when following absolute redirects from internal sources. vinext checks
+   * the URL hostname as a literal IP (Workers have no `dns.lookup`); set this
+   * when redirect destinations may be loopback or RFC1918 addresses.
    */
   dangerouslyAllowLocalIP?: boolean;
+  /**
+   * Most redirects the optimizer follows while resolving an internal source.
+   * Default: 3, matching Next.js `images.maximumRedirects`. `0` rejects the
+   * first redirect with 508.
+   */
+  maximumRedirects?: number;
   /** Content-Disposition header value. Default: "inline". */
   contentDispositionType?: "inline" | "attachment";
   /** Content-Security-Policy header value. Default: "script-src 'none'; frame-src 'none'; sandbox;" */
@@ -281,6 +287,174 @@ export const INVALID_IMAGE_SOURCE_MESSAGE = "The requested resource isn't a vali
 
 export function invalidImageSourceResponse(): Response {
   return new Response(INVALID_IMAGE_SOURCE_MESSAGE, { status: 400 });
+}
+
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+/** Next.js default `images.maximumRedirects`. */
+const DEFAULT_MAXIMUM_REDIRECTS = 3;
+
+/**
+ * Base origin used to resolve a relative `Location` from an internal source,
+ * which is handled in-process and has no real origin. Ported from Next.js
+ * `INTERNAL_IMAGE_BASE_URL` in packages/next/src/server/image-optimizer.ts.
+ */
+const INTERNAL_IMAGE_BASE_URL = "http://n";
+
+export function isRedirectStatus(status: number): boolean {
+  return REDIRECT_STATUSES.has(status);
+}
+
+function cancelImageSourceBody(response: Response): void {
+  const body = response.body;
+  if (!body || body.locked) return;
+  void body.cancel().catch(() => {
+    /* ignore cancellation failures on discarded redirect bodies */
+  });
+}
+
+const PROTOCOL_RELATIVE_IMAGE_URL_MESSAGE =
+  '"url" parameter cannot be a protocol-relative URL (//)';
+const RECURSIVE_IMAGE_URL_MESSAGE = '"url" parameter cannot be recursive';
+const INVALID_IMAGE_URL_MESSAGE = '"url" parameter is invalid';
+const IMAGE_URL_NOT_ALLOWED_MESSAGE = '"url" parameter is not allowed';
+const INVALID_INTERNAL_IMAGE_MESSAGE = '"url" parameter is valid but internal response is invalid';
+const INVALID_UPSTREAM_IMAGE_MESSAGE = '"url" parameter is valid but upstream response is invalid';
+
+function invalidInternalImageResponse(status: number): Response {
+  return new Response(INVALID_INTERNAL_IMAGE_MESSAGE, { status });
+}
+
+function invalidUpstreamImageResponse(status: number): Response {
+  return new Response(INVALID_UPSTREAM_IMAGE_MESSAGE, { status });
+}
+
+type ValidatedRedirectUrl = { href: string; isAbsolute: boolean } | { errorMessage: string };
+
+/**
+ * Validate a redirect `Location` the way Next.js `validateUrlParam(..., isRedirect)`
+ * does: skip local/remote pattern checks, but still reject protocol-relative,
+ * recursive optimizer, and non-http(s) destinations.
+ */
+function validateRedirectImageUrl(url: string): ValidatedRedirectUrl {
+  if (url.startsWith("//")) {
+    return { errorMessage: PROTOCOL_RELATIVE_IMAGE_URL_MESSAGE };
+  }
+  if (url.startsWith("/")) {
+    try {
+      const resolved = new URL(url.replaceAll("\\", "/"), INTERNAL_IMAGE_BASE_URL);
+      if (RECURSIVE_IMAGE_URL_RE.test(decodeURIComponent(resolved.pathname))) {
+        return { errorMessage: RECURSIVE_IMAGE_URL_MESSAGE };
+      }
+    } catch {
+      return { errorMessage: INVALID_IMAGE_URL_MESSAGE };
+    }
+    return { href: url, isAbsolute: false };
+  }
+  try {
+    const hrefParsed = new URL(url);
+    if (hrefParsed.protocol !== "http:" && hrefParsed.protocol !== "https:") {
+      return { errorMessage: INVALID_IMAGE_URL_MESSAGE };
+    }
+    return { href: hrefParsed.toString(), isAbsolute: true };
+  } catch {
+    return { errorMessage: INVALID_IMAGE_URL_MESSAGE };
+  }
+}
+
+async function fetchRemoteImageSource(
+  href: string,
+  request: Request,
+  imageConfig: ImageConfig | undefined,
+): Promise<Response> {
+  let parsed: URL;
+  try {
+    parsed = new URL(href);
+  } catch {
+    return new Response(INVALID_IMAGE_URL_MESSAGE, { status: 400 });
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return new Response(INVALID_IMAGE_URL_MESSAGE, { status: 400 });
+  }
+  if (!imageConfig?.dangerouslyAllowLocalIP && isPrivateIp(parsed.hostname)) {
+    return new Response(IMAGE_URL_NOT_ALLOWED_MESSAGE, { status: 400 });
+  }
+  try {
+    return await fetch(href, {
+      redirect: "manual",
+      signal: request.signal,
+      headers: { Accept: "*/*" },
+    });
+  } catch {
+    return invalidImageSourceResponse();
+  }
+}
+
+/**
+ * Follow 301/302/303/307/308 responses from an internal image source, matching
+ * Next.js `fetchInternalImage` (packages/next/src/server/image-optimizer.ts).
+ * Relative locations are fetched through `fetchInternal`; absolute locations
+ * use `fetch` with a literal private-IP check.
+ */
+async function fetchImageSourceFollowingRedirects(
+  href: string,
+  request: Request,
+  fetchInternal: (href: string, request: Request) => Promise<Response>,
+  imageConfig: ImageConfig | undefined,
+  remaining = imageConfig?.maximumRedirects ?? DEFAULT_MAXIMUM_REDIRECTS,
+  isAbsolute = false,
+): Promise<Response> {
+  const source = isAbsolute
+    ? await fetchRemoteImageSource(href, request, imageConfig)
+    : await fetchInternal(href, request);
+
+  const location = source.headers.get("Location");
+  if (
+    !isRedirectStatus(source.status) ||
+    !location ||
+    !URL.canParse(location, isAbsolute ? href : INTERNAL_IMAGE_BASE_URL)
+  ) {
+    // Next.js maps a non-OK local source to an invalid-image 400. Remote hops
+    // keep the status fetchRemoteImageSource already chose (private-IP 400,
+    // upstream 404, etc.).
+    if (!isAbsolute && !source.ok) {
+      cancelImageSourceBody(source);
+      return invalidImageSourceResponse();
+    }
+    return source;
+  }
+
+  cancelImageSourceBody(source);
+  if (remaining === 0) {
+    return isAbsolute ? invalidUpstreamImageResponse(508) : invalidInternalImageResponse(508);
+  }
+
+  if (isAbsolute) {
+    if (location.startsWith("//")) {
+      return new Response(PROTOCOL_RELATIVE_IMAGE_URL_MESSAGE, { status: 400 });
+    }
+    return fetchImageSourceFollowingRedirects(
+      new URL(location, href).href,
+      request,
+      fetchInternal,
+      imageConfig,
+      remaining - 1,
+      true,
+    );
+  }
+
+  const validated = validateRedirectImageUrl(location);
+  if ("errorMessage" in validated) {
+    return new Response(validated.errorMessage, { status: 400 });
+  }
+  return fetchImageSourceFollowingRedirects(
+    validated.href,
+    request,
+    fetchInternal,
+    imageConfig,
+    remaining - 1,
+    validated.isAbsolute,
+  );
 }
 
 const RECURSIVE_IMAGE_URL_RE = /\/_(?:next|vinext)\/image(?:$|\/)/;
@@ -716,11 +890,17 @@ export async function handleImageOptimization(
 
   const { imageUrl, width, quality } = params;
 
-  // Fetch source image
-  const fetchedSource = await handlers.fetchAsset(imageUrl, request);
+  const fetchSource = (sourceHref: string, sourceRequest: Request) =>
+    fetchImageSourceFollowingRedirects(sourceHref, sourceRequest, handlers.fetchAsset, imageConfig);
+
+  // Fetch source image, following internal redirects like Next.js.
+  const fetchedSource = await fetchSource(imageUrl, request);
+  if (!fetchedSource.ok) {
+    return fetchedSource.body ? fetchedSource : invalidImageSourceResponse();
+  }
   const isBuildAsset = isImageBuildAsset(fetchedSource);
   const source = await withSniffedImageContentType(fetchedSource);
-  if (!source.ok || !source.body) {
+  if (!source.body) {
     return invalidImageSourceResponse();
   }
 
@@ -778,7 +958,7 @@ export async function handleImageOptimization(
         let sourceBody = reader.body();
         if (!sourceBody) {
           reader.cancel();
-          const refetched = await handlers.fetchAsset(imageUrl, request);
+          const refetched = await fetchSource(imageUrl, request);
           if (!refetched.ok || !refetched.body) return invalidImageSourceResponse();
           reader = new ImageSourceReader(refetched.body, limit);
           sourceBody = reader.body()!;
@@ -837,9 +1017,7 @@ export async function handleImageOptimization(
   } catch (e) {
     console.error("[vinext] Image fallback error, refetching source image:", e);
     reader?.cancel();
-    const refetchedSource = await withSniffedImageContentType(
-      await handlers.fetchAsset(imageUrl, request),
-    );
+    const refetchedSource = await withSniffedImageContentType(await fetchSource(imageUrl, request));
     if (!refetchedSource.ok || !refetchedSource.body) {
       return invalidImageSourceResponse();
     }

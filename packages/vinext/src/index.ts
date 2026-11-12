@@ -5499,6 +5499,7 @@ export default function vinext(options: VinextOptions = {}): PluginOption[] {
                   contentSecurityPolicy: nextConfig?.images?.contentSecurityPolicy,
                   minimumCacheTTL: nextConfig?.images?.minimumCacheTTL,
                   maximumResponseBody: nextConfig?.images?.maximumResponseBody,
+                  maximumRedirects: nextConfig?.images?.maximumRedirects,
                 },
                 hasPagesDir,
                 publicFiles:
